@@ -56,7 +56,7 @@ export const World: React.FC<WorldProps> = ({ biome, objects }) => {
         <Group>
             {/* Floor - Responsive to point light */}
             <MeshTag rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
-                <PlaneGeometry args={[200, 200, 64, 64]} />
+                <PlaneGeometry args={[200, 200, 16, 16]} />
                 <MeshStandardMaterial color={floorColor} roughness={0.8} metalness={0.1} />
             </MeshTag>
 

@@ -3,28 +3,34 @@ import { Biome } from '../types';
 let audioCtx: any = null;
 let noiseBuffer: any = null;
 
+// ==================== 音频系统初始化 ====================
 const initAudio = () => {
   if (!audioCtx) {
     const Win = window as any;
     const AudioContextClass = Win.AudioContext || Win.webkitAudioContext;
     if (AudioContextClass) {
+      try {
         audioCtx = new AudioContextClass();
-        // Create a 1-second white noise buffer for texture synthesis
-        const bufferSize = audioCtx.sampleRate;
+        // 创建白噪声缓冲区
+        const bufferSize = audioCtx.sampleRate * 1;
         noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
         const data = noiseBuffer.getChannelData(0);
         for (let i = 0; i < bufferSize; i++) {
-            data[i] = Math.random() * 2 - 1;
+          data[i] = Math.random() * 2 - 1;
         }
+      } catch (error) {
+        console.error('音频上下文创建失败:', error);
+      }
     }
   }
+
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
   return audioCtx;
 };
 
-// Helper to create a noise node
+// 创建噪音节点
 const createNoiseNode = (ctx: any) => {
   const node = ctx.createBufferSource();
   node.buffer = noiseBuffer;
@@ -32,169 +38,315 @@ const createNoiseNode = (ctx: any) => {
   return node;
 };
 
-export const playCollisionSound = () => {
-    const ctx = initAudio();
-    if (!ctx) return;
-  
-    const t = ctx.currentTime;
-    const masterGain = ctx.createGain();
-    masterGain.connect(ctx.destination);
-    
-    // Sharp percussive "clack" (High frequency impact)
-    const osc = ctx.createOscillator();
-    const oscGain = ctx.createGain();
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(800, t);
-    osc.frequency.exponentialRampToValueAtTime(100, t + 0.08);
-    
-    oscGain.gain.setValueAtTime(0.15, t);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
-    
-    osc.connect(oscGain);
-    oscGain.connect(masterGain);
-    osc.start(t);
-    osc.stop(t + 0.1);
-  
-    // Low thud (Body of the stone hitting)
-    const thudOsc = ctx.createOscillator();
-    const thudGain = ctx.createGain();
-    thudOsc.type = 'sine';
-    thudOsc.frequency.setValueAtTime(150, t);
-    thudOsc.frequency.exponentialRampToValueAtTime(40, t + 0.15);
-  
-    thudGain.gain.setValueAtTime(0.4, t);
-    thudGain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
-  
-    thudOsc.connect(thudGain);
-    thudGain.connect(masterGain);
-    thudOsc.start(t);
-    thudOsc.stop(t + 0.2);
+// ==================== 公开音效函数 ====================
 
-    // Short scratch/noise
-    playNoiseBurst(ctx, masterGain, t, 1000, 0.05);
+/**
+ * 播放碰撞音效
+ */
+export const playCollisionSound = () => {
+  const ctx = initAudio();
+  if (!ctx) return;
+
+  const t = ctx.currentTime;
+  const masterGain = ctx.createGain();
+  masterGain.connect(ctx.destination);
+
+  // 1. 高频撞击声
+  const impactOsc = ctx.createOscillator();
+  const impactGain = ctx.createGain();
+  impactOsc.type = 'square';
+  impactOsc.frequency.setValueAtTime(1000, t);
+  impactOsc.frequency.exponentialRampToValueAtTime(180, t + 0.08);
+
+  impactGain.gain.setValueAtTime(0.4, t);
+  impactGain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+
+  impactOsc.connect(impactGain);
+  impactGain.connect(masterGain);
+  impactOsc.start(t);
+  impactOsc.stop(t + 0.12);
+
+  // 2. 低频共鸣声
+  const resonanceOsc = ctx.createOscillator();
+  const resonanceGain = ctx.createGain();
+  resonanceOsc.type = 'sine';
+  resonanceOsc.frequency.setValueAtTime(160, t);
+  resonanceOsc.frequency.exponentialRampToValueAtTime(50, t + 0.25);
+
+  resonanceGain.gain.setValueAtTime(0.25, t);
+  resonanceGain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+
+  resonanceOsc.connect(resonanceGain);
+  resonanceGain.connect(masterGain);
+  resonanceOsc.start(t);
+  resonanceOsc.stop(t + 0.3);
+
+  // 3. 碎石声
+  playNoiseBurst(ctx, masterGain, t + 0.01, 700, 0.06, 0.2);
 };
 
+/**
+ * 播放交互音效 - 只有物体材质声音，无声纳
+ */
 export const playInteractionSound = (type: string, distance: number, biome: Biome) => {
   const ctx = initAudio();
   if (!ctx) return;
 
   const t = ctx.currentTime;
-  const volume = Math.max(0.1, 1 - (distance / 4)); // Attenuate by distance
-  
-  // Master Gain for this event
+
+  // 距离衰减：1米内全音量，4米外10%音量
+  const distanceVolume = Math.max(0.1, 1 - (distance / 4));
+  const volume = distanceVolume * 0.9;
+
   const masterGain = ctx.createGain();
   masterGain.connect(ctx.destination);
   masterGain.gain.setValueAtTime(volume, t);
 
-  // 1. Always play a "Sonar Ping" (The Stone's sense)
-  const pingOsc = ctx.createOscillator();
-  const pingGain = ctx.createGain();
-  pingOsc.type = 'sine';
-  pingOsc.frequency.setValueAtTime(800, t);
-  pingOsc.frequency.exponentialRampToValueAtTime(400, t + 0.1);
-  
-  pingGain.gain.setValueAtTime(0.1, t);
-  pingGain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-  
-  pingOsc.connect(pingGain);
-  pingGain.connect(masterGain);
-  pingOsc.start(t);
-  pingOsc.stop(t + 0.15);
-
-  // 2. Material Response
+  // ============ 直接播放物体材质响应 ============
   if (type === 'void') {
-    return; 
+    // 虚无：播放轻微的环境音
+    playVoidSound(ctx, masterGain, t, volume * 0.5);
+    return;
   }
 
-  // Generalized sound mapping
-  if (['shell', 'glass', 'pebble', 'ice', 'obsidian', 'tile', 'bottle'].some(t => type.includes(t))) {
-      playHardClick(ctx, masterGain, t, 1200);
-  } 
-  else if (['rock', 'stone', 'castle', 'gravel', 'statue', 'steps', 'lantern', 'ruin', 'slate'].some(t => type.includes(t))) {
-      playHardClick(ctx, masterGain, t, 400); 
-      playNoiseBurst(ctx, masterGain, t, 300, 0.1); 
+  const typeLower = type.toLowerCase();
+
+  // 贝壳/玻璃/晶体类
+  if (typeLower.includes('shell') || typeLower.includes('glass') || typeLower.includes('crystal') ||
+    typeLower.includes('obsidian') || typeLower.includes('bottle')) {
+    playHardClick(ctx, masterGain, t, 1400, volume * 0.8);
   }
-  else if (['driftwood', 'wood', 'log', 'chest', 'bench', 'door', 'root'].some(t => type.includes(t))) {
-      playWoodThud(ctx, masterGain, t);
+
+  // 岩石/石头类
+  else if (typeLower.includes('rock') || typeLower.includes('stone') || typeLower.includes('reef') ||
+    typeLower.includes('gravel') || typeLower.includes('slate') || typeLower.includes('basalt') ||
+    typeLower.includes('pebble') || typeLower.includes('frozen_rock')) {
+    playHardClick(ctx, masterGain, t, 500, volume * 0.7);
+    playNoiseBurst(ctx, masterGain, t + 0.02, 300, 0.1, volume * 0.5);
   }
-  else if (['rail', 'pipe', 'coin', 'pole', 'burner'].some(t => type.includes(t))) {
-      playMetalClang(ctx, masterGain, t);
+
+  // 木质类
+  else if (typeLower.includes('wood') || typeLower.includes('log') || typeLower.includes('root') ||
+    typeLower.includes('pine') || typeLower.includes('drift') || typeLower.includes('floorboard')) {
+    playWoodThud(ctx, masterGain, t, volume * 0.9);
   }
-  else if (['chime', 'bell'].some(t => type.includes(t))) {
-      playChimeSound(ctx, masterGain, t);
+
+  // 金属类
+  else if (typeLower.includes('metal') || typeLower.includes('iron') || typeLower.includes('steel') ||
+    typeLower.includes('pipe') || typeLower.includes('rail') || typeLower.includes('pole') ||
+    typeLower.includes('booth') || typeLower.includes('carousel') || typeLower.includes('filter')) {
+    playMetalClang(ctx, masterGain, t, volume * 0.8);
   }
-  else if (['bubble', 'vent', 'steam', 'goldfish'].some(t => type.includes(t))) {
-      playBubblePop(ctx, masterGain, t);
+
+  // 气泡/水相关
+  else if (typeLower.includes('bubble') || typeLower.includes('water') || typeLower.includes('fish') ||
+    typeLower.includes('weed') || typeLower.includes('spring') || typeLower.includes('steam') ||
+    typeLower.includes('fissure') || typeLower.includes('hot')) {
+    playBubblePop(ctx, masterGain, t, volume);
+    if (typeLower.includes('bubble') || typeLower.includes('filter')) {
+      playNoiseBurst(ctx, masterGain, t + 0.05, 1000, 0.08, volume * 0.4);
+    }
   }
-  else if (['plastic', 'bag', 'flag'].some(t => type.includes(t))) {
-      playRustle(ctx, masterGain, t); // Crinkle
+
+  // 生物类
+  else if (typeLower.includes('rat') || typeLower.includes('penguin') || typeLower.includes('cat') ||
+    typeLower.includes('monk') || typeLower.includes('goldfish')) {
+    playSoftThud(ctx, masterGain, t, volume * 0.7);
+    if (typeLower.includes('rat') || typeLower.includes('penguin')) {
+      playSqueak(ctx, masterGain, t + 0.05, volume * 0.6);
+    }
   }
-  else if (['rat', 'penguin', 'cat', 'monk'].some(t => type.includes(t))) {
-      // Soft organic
-      playSoftThud(ctx, masterGain, t);
-      // Maybe a little squeak for rat/penguin?
-      if (type.includes('rat') || type.includes('penguin')) {
-         playSqueak(ctx, masterGain, t);
-      }
+
+  // 塑料/合成材料
+  else if (typeLower.includes('plastic') || typeLower.includes('toy') || typeLower.includes('bag') ||
+    typeLower.includes('trash') || typeLower.includes('ticket') || typeLower.includes('part')) {
+    playRustle(ctx, masterGain, t, volume * 0.9);
   }
+
+  // 沙/土/泥
+  else if (typeLower.includes('sand') || typeLower.includes('dune') || typeLower.includes('mound') ||
+    typeLower.includes('sludge') || typeLower.includes('puddle') || typeLower.includes('mud')) {
+    playNoiseBurst(ctx, masterGain, t, 250, 0.18, volume * 0.8);
+  }
+
+  // 风铃/铃铛
+  else if (typeLower.includes('chime') || typeLower.includes('bell') || typeLower.includes('wind_chime')) {
+    playChimeSound(ctx, masterGain, t, volume);
+  }
+
+  // 苔藓/蘑菇/植物
+  else if (typeLower.includes('moss') || typeLower.includes('mushroom') || typeLower.includes('fern') ||
+    typeLower.includes('weed') || typeLower.includes('seaweed') || typeLower.includes('vine') ||
+    typeLower.includes('tangle') || typeLower.includes('leaves') || typeLower.includes('pile') ||
+    typeLower.includes('cactus')) {
+    playSoftThud(ctx, masterGain, t, volume * 0.6);
+    playNoiseBurst(ctx, masterGain, t + 0.02, 600, 0.12, volume * 0.5);
+  }
+
+  // 冰类
+  else if (typeLower.includes('ice') || typeLower.includes('frozen') || typeLower.includes('glacial') ||
+    typeLower.includes('tundra') || typeLower.includes('pillar') || typeLower.includes('hole')) {
+    playHardClick(ctx, masterGain, t, 1600, volume * 0.7);
+    playNoiseBurst(ctx, masterGain, t + 0.03, 1800, 0.08, volume * 0.4);
+  }
+
+  // 火山/岩浆
+  else if (typeLower.includes('magma') || typeLower.includes('volcano') || typeLower.includes('lava') ||
+    typeLower.includes('gas') || typeLower.includes('sulfur')) {
+    playNoiseBurst(ctx, masterGain, t, 120, 0.3, volume * 0.7);
+  }
+
+  // 废墟/古老建筑
+  else if (typeLower.includes('ruin') || typeLower.includes('ancient') || typeLower.includes('castle') ||
+    typeLower.includes('statue') || typeLower.includes('step') || typeLower.includes('rubble')) {
+    playHardClick(ctx, masterGain, t, 350, volume * 0.8);
+    playNoiseBurst(ctx, masterGain, t + 0.05, 200, 0.15, volume * 0.4);
+  }
+
+  // 头骨/骨骼
+  else if (typeLower.includes('skull') || typeLower.includes('bone') || typeLower.includes('skeleton')) {
+    playHardClick(ctx, masterGain, t, 700, volume * 0.7);
+    playNoiseBurst(ctx, masterGain, t + 0.03, 500, 0.1, volume * 0.5);
+  }
+
+  // 默认（柔软的有机材料）
   else {
-      // Default soft/organic (fern, moss, vine, etc.)
-      playSoftThud(ctx, masterGain, t);
+    playSoftThud(ctx, masterGain, t, volume * 0.6);
   }
 };
 
-// -- Sound Generators --
-
-const playMetalClang = (ctx: any, output: any, time: number) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    
-    // Inharmonic frequencies for metallic sound
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(500, time);
-    osc.frequency.exponentialRampToValueAtTime(480, time + 0.3);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 1000;
-    filter.Q.value = 5;
-
-    gain.gain.setValueAtTime(0.3, time);
-    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.5);
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(output);
-    osc.start(time);
-    osc.stop(time + 0.6);
-};
-
-const playChimeSound = (ctx: any, output: any, time: number) => {
-    // Multiple high sine waves
-    [2000, 2400, 3100].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, time);
-        gain.gain.setValueAtTime(0.1, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 1.5 + i * 0.5);
-        osc.connect(gain);
-        gain.connect(output);
-        osc.start(time);
-        osc.stop(time + 2.0);
-    });
-};
-
-const playHardClick = (ctx: any, output: any, time: number, freq: number) => {
+/**
+ * 播放虚无音效（当没有物体可感知时）
+ */
+const playVoidSound = (ctx: any, output: any, time: number, volume: number = 1.0) => {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  
+
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(220, time);
+  osc.frequency.exponentialRampToValueAtTime(180, time + 0.3);
+
+  gain.gain.setValueAtTime(0.2 * volume, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);
+
+  osc.connect(gain);
+  gain.connect(output);
+  osc.start(time);
+  osc.stop(time + 0.35);
+};
+
+// ==================== 音效生成器函数 ====================
+
+const playMetalClang = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(450, time);
+  osc.frequency.exponentialRampToValueAtTime(420, time + 0.3);
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = 900;
+  filter.Q.value = 6;
+
+  gain.gain.setValueAtTime(0.4 * volume, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(output);
+  osc.start(time);
+  osc.stop(time + 0.4);
+};
+
+const playChimeSound = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  const frequencies = [1046.5, 1318.5, 1568];
+  frequencies.forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, time);
+    gain.gain.setValueAtTime(0.1 * volume, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 1.5 + i * 0.2);
+    osc.connect(gain);
+    gain.connect(output);
+    osc.start(time);
+    osc.stop(time + 1.7);
+  });
+};
+
+const playHardClick = (ctx: any, output: any, time: number, freq: number, volume: number = 1.0) => {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
   osc.type = 'triangle';
   osc.frequency.setValueAtTime(freq, time);
-  osc.frequency.exponentialRampToValueAtTime(freq * 0.5, time + 0.05);
+  osc.frequency.exponentialRampToValueAtTime(freq * 0.6, time + 0.05);
 
-  gain.gain.setValueAtTime(0.3, time);
+  gain.gain.setValueAtTime(0.3 * volume, time);
   gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+
+  osc.connect(gain);
+  gain.connect(output);
+  osc.start(time);
+  osc.stop(time + 0.08);
+};
+
+const playWoodThud = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(180, time);
+  osc.frequency.exponentialRampToValueAtTime(90, time + 0.1);
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 350;
+
+  gain.gain.setValueAtTime(0.5 * volume, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(output);
+  osc.start(time);
+  osc.stop(time + 0.15);
+};
+
+const playSoftThud = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  const noise = createNoiseNode(ctx);
+  const gain = ctx.createGain();
+  const filter = ctx.createBiquadFilter();
+
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(280, time);
+  filter.frequency.linearRampToValueAtTime(100, time + 0.2);
+
+  gain.gain.setValueAtTime(0.7 * volume, time);
+  gain.gain.linearRampToValueAtTime(0.001, time + 0.2);
+
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(output);
+  noise.start(time);
+  noise.stop(time + 0.22);
+};
+
+const playRustle = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  playNoiseBurst(ctx, output, time, 1800, 0.15, volume * 0.8);
+};
+
+const playSqueak = (ctx: any, output: any, time: number, volume: number = 1.0) => {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(1600, time);
+  osc.frequency.linearRampToValueAtTime(2200, time + 0.06);
+
+  gain.gain.setValueAtTime(0.2 * volume, time);
+  gain.gain.linearRampToValueAtTime(0.001, time + 0.08);
 
   osc.connect(gain);
   gain.connect(output);
@@ -202,101 +354,54 @@ const playHardClick = (ctx: any, output: any, time: number, freq: number) => {
   osc.stop(time + 0.1);
 };
 
-const playWoodThud = (ctx: any, output: any, time: number) => {
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  
-  // Square gives a "hollow" quality
-  osc.type = 'square';
-  osc.frequency.setValueAtTime(200, time);
-  osc.frequency.exponentialRampToValueAtTime(100, time + 0.1);
-
-  // Lowpass to muffle it
-  const filter = ctx.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.frequency.value = 400;
-
-  gain.gain.setValueAtTime(0.4, time);
-  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.15);
-
-  osc.connect(filter);
-  filter.connect(gain);
-  gain.connect(output);
-  osc.start(time);
-  osc.stop(time + 0.2);
-};
-
-const playSoftThud = (ctx: any, output: any, time: number) => {
-  const noise = createNoiseNode(ctx);
-  const gain = ctx.createGain();
-  const filter = ctx.createBiquadFilter();
-
-  filter.type = 'lowpass';
-  filter.frequency.setValueAtTime(300, time);
-  filter.frequency.linearRampToValueAtTime(100, time + 0.2);
-
-  gain.gain.setValueAtTime(0.5, time);
-  gain.gain.linearRampToValueAtTime(0.001, time + 0.2);
-
-  noise.connect(filter);
-  filter.connect(gain);
-  gain.connect(output);
-  noise.start(time);
-  noise.stop(time + 0.25);
-};
-
-const playRustle = (ctx: any, output: any, time: number) => {
-    playNoiseBurst(ctx, output, time, 2000, 0.15);
-};
-
-const playSqueak = (ctx: any, output: any, time: number) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(1500, time);
-    osc.frequency.linearRampToValueAtTime(2000, time + 0.1);
-    
-    gain.gain.setValueAtTime(0.1, time);
-    gain.gain.linearRampToValueAtTime(0.001, time + 0.15);
-    
-    osc.connect(gain);
-    gain.connect(output);
-    osc.start(time);
-    osc.stop(time + 0.2);
-};
-
-const playNoiseBurst = (ctx: any, output: any, time: number, cutoff: number, duration: number) => {
+const playNoiseBurst = (ctx: any, output: any, time: number, cutoff: number, duration: number, volume: number = 1.0) => {
   const noise = createNoiseNode(ctx);
   const gain = ctx.createGain();
   const filter = ctx.createBiquadFilter();
 
   filter.type = 'bandpass';
   filter.frequency.value = cutoff;
-  filter.Q.value = 1;
+  filter.Q.value = 1.2;
 
-  gain.gain.setValueAtTime(0.2, time);
+  gain.gain.setValueAtTime(0.3 * volume, time);
   gain.gain.exponentialRampToValueAtTime(0.001, time + duration);
 
   noise.connect(filter);
   filter.connect(gain);
   gain.connect(output);
   noise.start(time);
-  noise.stop(time + duration + 0.1);
+  noise.stop(time + duration + 0.05);
 };
 
-const playBubblePop = (ctx: any, output: any, time: number) => {
+const playBubblePop = (ctx: any, output: any, time: number, volume: number = 1.0) => {
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(400, time);
-  osc.frequency.exponentialRampToValueAtTime(900, time + 0.1);
 
-  gain.gain.setValueAtTime(0.5, time);
-  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(350, time);
+  osc.frequency.exponentialRampToValueAtTime(850, time + 0.06);
+
+  gain.gain.setValueAtTime(0.6 * volume, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.06);
 
   osc.connect(gain);
   gain.connect(output);
   osc.start(time);
-  osc.stop(time + 0.15);
+  osc.stop(time + 0.1);
+};
+
+/**
+ * 预加载音频系统
+ */
+export const preloadAudio = () => {
+  const ctx = initAudio();
+  if (ctx) {
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 0;
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 0.001);
+  }
 };

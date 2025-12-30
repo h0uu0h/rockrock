@@ -90,7 +90,10 @@ export default function App() {
         localStorage.setItem("lithos_collection", JSON.stringify(collection));
     }, [collection]);
 
-    const worldObjects = useMemo(() => generateBiomeObjects(biome), [biome]);
+    const worldObjects = useMemo(() => {
+        const seed = `${biome}-seed`; // 使用固定种子确保稳定
+        return generateBiomeObjects(biome, 300); // 减少数量
+    }, [biome]);
 
     useEffect(() => {
         let interval: ReturnType<typeof setInterval>;
@@ -188,33 +191,51 @@ export default function App() {
         }
     };
 
-    useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.code === "Space" && !e.repeat && !godMode) setEyesClosed(true);
-            if (e.code === "Enter") handleBlink();
-            if (e.code === "KeyG") setIsGalleryOpen((prev) => !prev);
-        };
-        const handleKeyUp = (e: KeyboardEvent) => {
-            if (e.code === "Space") setEyesClosed(false);
-        };
+    const handleKeyDown = useCallback(
+        (e: KeyboardEvent) => {
+            if (e.code === "Space" && !e.repeat && !godMode) {
+                setEyesClosed(true);
+            }
 
+            if (e.code === "Enter" && !e.repeat) {
+                handleBlink();
+            }
+
+            if (e.code === "KeyG" && !e.repeat) {
+                setIsGalleryOpen((prev) => !prev);
+            }
+        },
+        [godMode, handleBlink]
+    );
+
+    const handleKeyUp = useCallback(
+        (e: KeyboardEvent) => {
+            if (e.code === "Space" && !godMode) {
+                setEyesClosed(false);
+            }
+        },
+        [godMode]
+    );
+
+    useEffect(() => {
         window.addEventListener("keydown", handleKeyDown);
         window.addEventListener("keyup", handleKeyUp);
+
         return () => {
             window.removeEventListener("keydown", handleKeyDown);
             window.removeEventListener("keyup", handleKeyUp);
         };
-    }, [eyesClosed, isThinking, biome, worldObjects, godMode]);
+    }, [handleKeyDown, handleKeyUp]);
 
     const fogNear = godMode ? 20 : eyesClosed ? 1.0 : 2;
-    const fogFar = godMode ? 80 : eyesClosed ? 4.5 : 12;
+    const fogFar = godMode ? 120 : eyesClosed ? 12 : 12;
 
     return (
         <div className="w-full h-screen bg-black relative font-sans select-none overflow-hidden">
             <Canvas shadows dpr={[1, 2]} camera={{ position: [0, 6, 4], fov: 45 }}>
                 <ColorTag attach="background" args={["#020202"]} />
                 <FogTag attach="fog" args={["#020202", fogNear, fogFar]} />
-                <AmbientLight intensity={godMode ? 0.4 : eyesClosed ? 0.8 : 0.05} />
+                <AmbientLight intensity={godMode ? 10 : eyesClosed ? 0.8 : 0.05} />
                 {godMode && <DirectionalLight position={[10, 20, 10]} intensity={1.0} castShadow shadow-mapSize={[1024, 1024]} />}
                 <Stone
                     eyesClosed={eyesClosed && !godMode}
@@ -226,8 +247,7 @@ export default function App() {
                 {/* Fix: Removed eyesClosed prop from World component call as it is not defined in WorldProps */}
                 <World biome={biome} objects={worldObjects || []} />
                 <EffectComposer enableNormalPass={false}>
-                    {eyesClosed && !godMode && <Pixelation granularity={10} />}
-                    <Pixelation granularity={8} />
+                    {!godMode && <Pixelation granularity={6} />}
                     {/* <Noise opacity={eyesClosed ? 0.4 : 0.1} /> */}
                     {/* <Vignette eskil={false} offset={0.1} darkness={godMode ? 0.5 : eyesClosed ? 1.8 : 1.3} /> */}
                 </EffectComposer>
