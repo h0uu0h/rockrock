@@ -1,5 +1,6 @@
 // components/EyeController.ts
 import { useEffect, useRef, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
 
 interface EyeControllerProps {
     onEyesClosed?: (duration: number) => void;
@@ -18,281 +19,210 @@ export const useEyeController = (props?: EyeControllerProps) => {
 
     const [isConnected, setIsConnected] = useState(false);
     const [isCalibrating, setIsCalibrating] = useState(true);
-    const [eyeState, setEyeState] = useState<'open' | 'closed'>('open');
+    const [eyeState, setEyeState] = useState<'open' | 'closed' | 'no_face'>('open');
     const [blinkCount, setBlinkCount] = useState(0);
     const [earValue, setEarValue] = useState(0);
-    const [threshold, setThreshold] = useState(0.3);
     const [fps, setFps] = useState(0);
     const [error, setError] = useState<string | null>(null);
 
-    const socketRef = useRef<WebSocket | null>(null);
+    const socketRef = useRef<Socket | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
     const animationFrameRef = useRef<number | null>(null);
     const lastFrameTimeRef = useRef<number>(0);
-    const frameIntervalRef = useRef<number>(100); // 每100ms发送一帧（10fps）
 
-    // 初始化摄像头
+    // 限制发送频率为 15 FPS (约 66ms)，平衡性能与实时性
+    const frameIntervalRef = useRef<number>(66);
+
     const initCamera = async () => {
         try {
-            if (!enabled) return;
+            if (!enabled) return false;
+            // 停止旧流
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
 
+            // 获取摄像头流
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: 640,
-                    height: 480,
+                    width: 320, // 低分辨率足够检测，且传输极快
+                    height: 240,
+                    frameRate: { ideal: 30 },
                     facingMode: 'user'
                 },
                 audio: false
             });
 
             streamRef.current = stream;
-
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
-                await videoRef.current.play();
+                // 确保视频已经准备好播放
+                await new Promise((resolve) => {
+                    if (videoRef.current) {
+                        videoRef.current.onloadedmetadata = () => {
+                            videoRef.current?.play().then(resolve);
+                        };
+                    }
+                });
             }
-
-            console.log('摄像头初始化成功');
             return true;
         } catch (err) {
             console.error('摄像头初始化失败:', err);
-            setError('无法访问摄像头，请检查权限');
+            setError('无法访问摄像头，请检查权限。');
             return false;
         }
     };
 
-    // 初始化WebSocket连接
-    const connectWebSocket = () => {
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-            return true;
-        }
+    const connectSocket = () => {
+        if (socketRef.current?.connected) return;
 
-        try {
-            const socket = new WebSocket('ws://localhost:5000');
+        const socket = io('http://localhost:5000', {
+            transports: ['websocket'],
+            reconnection: true,
+            reconnectionAttempts: 10
+        });
 
-            socket.onopen = () => {
-                console.log('WebSocket连接已建立');
-                setIsConnected(true);
-                setError(null);
-            };
+        socket.on('connect', () => {
+            console.log('Socket已连接:', socket.id);
+            setIsConnected(true);
+            setError(null);
+        });
 
-            socket.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
+        socket.on('disconnect', () => {
+            console.log('Socket已断开');
+            setIsConnected(false);
+        });
 
-                    switch (data.event) {
-                        case 'connected':
-                            console.log('已连接到眨眼检测服务器');
-                            break;
+        socket.on('connect_error', (err) => {
+            console.error('Socket连接错误:', err);
+            // 不频繁报错，以免刷屏
+        });
+        socket.on('calibration_complete', (data) => {
+            console.log('校准完成，阈值:', data.threshold);
+            setIsCalibrating(false);
+            setError(null); // 清除可能的错误
+        });
 
-                        case 'calibration_complete':
-                            setIsCalibrating(false);
-                            setThreshold(data.threshold);
-                            console.log('校准完成，阈值:', data.threshold);
-                            break;
+        // --- 核心事件监听 ---
 
-                        case 'eyes_closed':
-                            setEyeState('closed');
-                            onEyesClosed?.(data.duration || 0);
-                            break;
+        socket.on('blink_detected', (data) => {
+            setBlinkCount(data.count);
+            onBlink?.(data.count);
+        });
 
-                        case 'eyes_opened':
-                            setEyeState('open');
-                            onEyesOpened?.();
-                            break;
+        socket.on('eyes_closed', (data) => {
+            // 只在状态改变时触发
+            setEyeState('closed');
+            onEyesClosed?.(data.duration || 0);
+        });
 
-                        case 'blink_detected':
-                            setBlinkCount(data.count);
-                            onBlink?.(data.count);
-                            break;
+        socket.on('eye_data', (data) => {
+            // 只要收到数据，就说明已经通了，关闭校准（除非后端显式说正在 calibrating）
+            if (data.calibrating === true || data.state === 'calibrating') {
+                setIsCalibrating(true);
+            } else {
+                setIsCalibrating(false);
+            }
 
-                        case 'eye_data':
-                            setEarValue(data.ear);
-                            setEyeState(data.state);
-                            setThreshold(data.threshold);
-                            setFps(data.fps);
-                            setIsCalibrating(data.calibrating);
-                            break;
+            // 处理无脸状态
+            if (data.state === 'no_face') {
+                setEyeState('no_face');
+                setEarValue(0); // 归零EAR
+                setFps(data.fps);
+                return;
+            }
 
-                        case 'error':
-                            setError(data.message);
-                            break;
-                    }
-                } catch (err) {
-                    console.error('解析WebSocket消息失败:', err);
-                }
-            };
+            setEarValue(data.ear);
+            setEyeState(data.state);
+            setFps(data.fps);
 
-            socket.onerror = (err) => {
-                console.error('WebSocket错误:', err);
-                setError('WebSocket连接错误');
-            };
+            // 如果后端检测到睁眼，且当前状态不是 open，触发回调
+            if (data.state === 'open' && eyeState !== 'open') {
+                onEyesOpened?.();
+            }
+        });
 
-            socket.onclose = () => {
-                console.log('WebSocket连接已关闭');
-                setIsConnected(false);
-            };
-
-            socketRef.current = socket;
-            return true;
-        } catch (err) {
-            console.error('WebSocket连接失败:', err);
-            setError('无法连接到眨眼检测服务器');
-            return false;
-        }
+        socketRef.current = socket;
     };
 
-    // 发送视频帧
     const sendFrame = () => {
-        if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-            return;
-        }
+        if (!socketRef.current?.connected || !videoRef.current) return;
 
-        if (!videoRef.current || !streamRef.current) {
-            return;
-        }
+        // 创建临时 Canvas 截取视频帧
+        const canvas = document.createElement('canvas');
+        canvas.width = 320;
+        canvas.height = 240;
 
-        try {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
 
-            if (!ctx) return;
+        // 绘制当前帧
+        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
-            canvas.width = 640;
-            canvas.height = 480;
-
-            ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-
-            // 压缩图像为JPEG
-            canvas.toBlob((blob) => {
-                if (blob && socketRef.current?.readyState === WebSocket.OPEN) {
-                    socketRef.current.send(blob);
-                }
-            }, 'image/jpeg', 0.7);
-
-        } catch (err) {
-            console.error('发送帧失败:', err);
-        }
+        // 转为 Blob 并直接发送
+        canvas.toBlob((blob) => {
+            if (blob) {
+                // Socket.IO 可以直接发送 Blob 二进制数据
+                socketRef.current?.emit('frame', blob);
+            }
+        }, 'image/jpeg', 0.5); // 0.5 质量压缩，极速传输
     };
 
-    // 主循环
     const startFrameLoop = () => {
-        if (!enabled || !isConnected) return;
-
         const loop = (timestamp: number) => {
+            if (!enabled) return;
+
             if (timestamp - lastFrameTimeRef.current >= frameIntervalRef.current) {
                 sendFrame();
                 lastFrameTimeRef.current = timestamp;
             }
-
-            if (enabled && isConnected) {
-                animationFrameRef.current = requestAnimationFrame(loop);
-            }
+            animationFrameRef.current = requestAnimationFrame(loop);
         };
-
         animationFrameRef.current = requestAnimationFrame(loop);
     };
 
-    // 停止所有资源
-    const stop = () => {
-        if (animationFrameRef.current) {
-            cancelAnimationFrame(animationFrameRef.current);
-            animationFrameRef.current = null;
-        }
-
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-        }
-
-        if (socketRef.current) {
-            socketRef.current.close();
-            socketRef.current = null;
-        }
-
-        setIsConnected(false);
-    };
-
-    // 开始检测
     const start = async () => {
         if (!enabled) return;
-
-        setError(null);
-
-        // 1. 初始化摄像头
-        const cameraSuccess = await initCamera();
-        if (!cameraSuccess) return;
-
-        // 2. 连接WebSocket
-        const socketSuccess = connectWebSocket();
-        if (!socketSuccess) return;
-
-        // 等待连接建立
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // 3. 开始帧循环
-        if (isConnected) {
+        const cameraOk = await initCamera();
+        if (cameraOk) {
+            connectSocket();
             startFrameLoop();
         }
     };
 
-    // 重置校准
-    const resetCalibration = () => {
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-            socketRef.current.send(JSON.stringify({
-                event: 'reset_calibration'
-            }));
-            setIsCalibrating(true);
-            setBlinkCount(0);
+    const stop = () => {
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
         }
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(t => t.stop());
+        }
+        if (socketRef.current) {
+            socketRef.current.disconnect();
+        }
+        setIsConnected(false);
     };
 
-    // 组件挂载/卸载
     useEffect(() => {
         if (enabled) {
             start();
-        }
-
-        return () => {
+        } else {
             stop();
-        };
+        }
+        return () => stop();
     }, [enabled]);
 
     return {
-        // 状态
         isConnected,
         isCalibrating,
         eyeState,
         blinkCount,
         earValue,
-        threshold,
         fps,
         error,
-
-        // 引用
         videoRef,
-
-        // 方法
         start,
         stop,
-        resetCalibration,
-
-        // 控制
-        enabled,
-
-        // 手动触发（用于调试）
-        triggerBlink: () => {
-            setBlinkCount(prev => prev + 1);
-            onBlink?.(blinkCount + 1);
-        },
-        triggerEyesClosed: () => {
-            setEyeState('closed');
-            onEyesClosed?.(0.5);
-        },
-        triggerEyesOpened: () => {
-            setEyeState('open');
-            onEyesOpened?.();
-        }
+        triggerBlink: () => onBlink?.(blinkCount + 1),
     };
 };

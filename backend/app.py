@@ -1,5 +1,5 @@
 import eventlet
-from flask import Flask, request
+from flask import Flask
 from flask_cors import CORS
 from flask_socketio import SocketIO
 import cv2
@@ -8,72 +8,64 @@ from io import BytesIO
 from PIL import Image
 from math import sqrt
 import time
-import json
-import os
-import uuid
 from datetime import datetime
 
+# 启用 Eventlet 异步模式
 eventlet.monkey_patch()
 
 app = Flask(__name__)
 CORS(app)
+# async_mode='eventlet' 对于实时视频流至关重要
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
-# Initialize MediaPipe
+# --- MediaPipe 初始化 ---
 import mediapipe as mp
-
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
-    refine_landmarks=True,
+    refine_landmarks=True, # 关键：开启精细点位
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 )
 
-# 眼睛关键点索引
+# 关键点索引
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 
-
 class EyeStateDetector:
     def __init__(self):
-        # 眨眼检测相关变量
+        # 校准相关
         self.calibrating = True
         self.ratios = []
         self.min_ratio = float("inf")
         self.max_ratio = float("-inf")
-        self.threshold = 0.3
-        self.calibration_samples = 30  # 减少校准样本数，加快校准
+        self.threshold = 0.25 # 默认初始阈值
+        
+        # 图像增强 (移植自 app_gray.py)
+        # 即使在光线不好的情况下也能看清眼睛
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-        # 眼睛状态跟踪
-        self.eye_state = "open"  # open, closed
+        # 状态跟踪
+        self.eye_state = "open"
+        self.blink_counter = 0
         self.closed_start_time = None
-        self.last_blink_time = None
         
-        # 状态变化计数器
-        self.blink_count = 0
-        self.eyes_closed_duration = 0
-        self.eyes_open_duration = 0
-        
-        # 平滑滤波
-        self.ear_history = []
-        self.history_size = 5
-        self.smoothed_ear = 0
-        
-        # 性能跟踪
+        # 性能统计
         self.frame_count = 0
         self.fps = 0
         self.last_fps_time = time.time()
-        
-        # 连接状态
-        self.connected_clients = 0
 
     def _calculate_ear(self, landmarks, eye_points):
-        """计算眼睛纵横比(EAR)"""
+        """
+        计算 3D EAR (移植自 app_gray.py)
+        使用 (x, y, z) 三维坐标计算，防止头部偏转导致的误判
+        """
         def distance(p1, p2):
             return sqrt(
-                (p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2
+                (p2[0] - p1[0]) ** 2 + 
+                (p2[1] - p1[1]) ** 2 + 
+                (p2[2] - p1[2]) ** 2
             )
 
         # 垂直距离
@@ -85,40 +77,67 @@ class EyeStateDetector:
 
         return (ver1 + ver2) / (2.0 * hor) if hor != 0 else 0
 
-    def _smooth_ear(self, current_ear):
-        """平滑EAR值，减少抖动"""
-        self.ear_history.append(current_ear)
-        if len(self.ear_history) > self.history_size:
-            self.ear_history.pop(0)
-        return sum(self.ear_history) / len(self.ear_history)
-
-    def calibrate(self, avg_ear):
-        """执行校准"""
-        self.min_ratio = min(self.min_ratio, avg_ear)
-        self.max_ratio = max(self.max_ratio, avg_ear)
-        self.ratios.append(avg_ear)
-
-        if len(self.ratios) >= self.calibration_samples:
-            # 动态阈值设置：眼睛闭合时EAR的70%位置
-            self.threshold = self.min_ratio + (self.max_ratio - self.min_ratio) * 0.7
-            self.calibrating = False
-            print(f"校准完成！阈值: {self.threshold:.4f}")
-            print(f"最小EAR: {self.min_ratio:.4f}, 最大EAR: {self.max_ratio:.4f}")
-            return True
-        return False
-
-    def detect_eye_state(self, avg_ear):
-        """检测眼睛状态"""
-        # 平滑EAR值
-        smoothed_ear = self._smooth_ear(avg_ear)
-        self.smoothed_ear = smoothed_ear
-        
+    def process_frame(self, frame):
+        # 1. 计算 FPS
+        self.frame_count += 1
         current_time = time.time()
+        if current_time - self.last_fps_time >= 1.0:
+            self.fps = self.frame_count
+            self.frame_count = 0
+            self.last_fps_time = current_time
+
+        # 2. 图像增强 (移植自 app_gray.py)
+        # 转灰度 -> 增强对比度 -> 转回 RGB
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = self.clahe.apply(gray)
+        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+        results = face_mesh.process(rgb)
         
-        # 校准阶段
-        if self.calibrating:
-            is_calibrated = self.calibrate(smoothed_ear)
-            if is_calibrated:
+        # 3. 未检测到人脸的处理 (修复前端“一直校准中”的 Bug)
+        if not results.multi_face_landmarks:
+            socketio.start_background_task(
+                lambda: socketio.emit("eye_data", {
+                    "ear": 0,
+                    "state": "no_face",   # 明确告知前端没脸
+                    "threshold": self.threshold,
+                    "fps": self.fps,
+                    "calibrating": False  # 强制结束校准动画
+                })
+            )
+            return
+
+        for face_landmarks in results.multi_face_landmarks:
+            # 获取 3D 坐标
+            landmarks = [(lm.x, lm.y, lm.z) for lm in face_landmarks.landmark]
+            left_ear = self._calculate_ear(landmarks, LEFT_EYE)
+            right_ear = self._calculate_ear(landmarks, RIGHT_EYE)
+            avg_ear = (left_ear + right_ear) / 2
+            
+            # --- 校准逻辑 ---
+            if self.calibrating:
+                self.min_ratio = min(self.min_ratio, avg_ear)
+                self.max_ratio = max(self.max_ratio, avg_ear)
+                self.ratios.append(avg_ear)
+                socketio.start_background_task(
+                    lambda: socketio.emit("eye_data", {
+                        "ear": avg_ear,
+                        "state": "calibrating",
+                        "threshold": self.threshold,
+                        "fps": self.fps,
+                        "calibrating": True,
+                        "calibration_progress": len(self.ratios) / 60  # 添加进度
+                    })
+                )
+                # 采集 60 帧 (约 2-3 秒) 后自动完成校准
+                if len(self.ratios) >= 60:
+                    # 动态计算阈值：在最小闭眼值和最大睁眼值之间取 40% 处
+                    # 例如：闭眼 0.15，睁眼 0.35 -> 阈值约 0.23
+                    self.threshold = self.min_ratio + (self.max_ratio - self.min_ratio) * 0.4
+                    self.calibrating = False
+                    print(f"[系统] 校准完成，动态阈值: {self.threshold:.4f}")
+                
+                # 校准期间也发送数据，让前端能看到进度或数值
                 socketio.start_background_task(
                     lambda: socketio.emit("calibration_complete", {
                         "threshold": self.threshold,
@@ -126,229 +145,86 @@ class EyeStateDetector:
                         "max_ear": self.max_ratio
                     })
                 )
-            return {"status": "calibrating", "progress": len(self.ratios) / self.calibration_samples}
+                return
 
-        # 检测眼睛状态
-        if smoothed_ear < self.threshold:
-            # 眼睛闭合
-            if self.eye_state != "closed":
-                self.eye_state = "closed"
-                self.closed_start_time = current_time
-                
-                # 发送闭眼事件
-                socketio.start_background_task(
-                    lambda: socketio.emit("eyes_closed", {
-                        "timestamp": datetime.now().isoformat(),
-                        "ear": smoothed_ear
-                    })
-                )
-                
-            # 计算闭眼时长
-            if self.closed_start_time:
-                closed_duration = current_time - self.closed_start_time
-                self.eyes_closed_duration = closed_duration
-                
-        else:
-            # 眼睛睁开
-            if self.eye_state == "closed":
-                # 从闭眼到睁开：检测到眨眼
-                blink_duration = 0
-                if self.closed_start_time:
-                    blink_duration = current_time - self.closed_start_time
-                
-                self.eye_state = "open"
-                self.last_blink_time = current_time
-                self.blink_count += 1
-                
-                # 发送眨眼事件
-                socketio.start_background_task(
-                    lambda: socketio.emit("blink_detected", {
-                        "timestamp": datetime.now().isoformat(),
-                        "count": self.blink_count,
-                        "duration": blink_duration,
-                        "ear": smoothed_ear
-                    })
-                )
-                
-                # 重置闭眼时间
-                self.closed_start_time = None
-                self.eyes_closed_duration = 0
+            # --- 正常检测逻辑 ---
+            current_state = "open"
             
-            # 计算睁眼时长
-            if self.last_blink_time:
-                self.eyes_open_duration = current_time - self.last_blink_time
+            # 只有双眼同时低于阈值才算闭眼，防止单眼误判
+            if left_ear < self.threshold and right_ear < self.threshold:
+                current_state = "closed"
+                if self.eye_state != "closed":
+                    self.eye_state = "closed"
+                    self.closed_start_time = time.time()
+                    # 触发闭眼事件
+                    socketio.start_background_task(
+                        lambda: socketio.emit("eyes_closed", {
+                            "timestamp": datetime.now().isoformat(),
+                            "duration": 0
+                        })
+                    )
+            else:
+                # 眼睛睁开
+                if self.eye_state == "closed":
+                    # 计算闭眼持续时间
+                    duration = time.time() - (self.closed_start_time or time.time())
+                    self.eye_state = "open"
+                    
+                    # 只有非常短暂的闭合才算眨眼，太长算“闭目养神”
+                    # 这里不做过多限制，由前端逻辑决定
+                    self.blink_counter += 1
+                    
+                    socketio.start_background_task(
+                        lambda: socketio.emit("blink_detected", {
+                            "count": self.blink_counter,
+                            "timestamp": datetime.now().isoformat(),
+                            "duration": duration
+                        })
+                    )
 
-        return {
-            "state": self.eye_state,
-            "ear": smoothed_ear,
-            "threshold": self.threshold,
-            "blink_count": self.blink_count,
-            "eyes_closed_duration": self.eyes_closed_duration,
-            "eyes_open_duration": self.eyes_open_duration
-        }
-
-    def reset(self):
-        """重置检测器状态"""
-        self.calibrating = True
-        self.ratios = []
-        self.min_ratio = float("inf")
-        self.max_ratio = float("-inf")
-        self.eye_state = "open"
-        self.closed_start_time = None
-        self.last_blink_time = None
-        self.blink_count = 0
-        self.eyes_closed_duration = 0
-        self.eyes_open_duration = 0
-        self.ear_history = []
-
-    def process_frame(self, frame):
-        """处理视频帧"""
-        # 更新FPS
-        self.frame_count += 1
-        current_time = time.time()
-        if current_time - self.last_fps_time >= 1.0:
-            self.fps = self.frame_count
-            self.frame_count = 0
-            self.last_fps_time = current_time
-        
-        # 图像预处理
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-
-        results = face_mesh.process(rgb)
-        if not results.multi_face_landmarks:
-            # 没有检测到人脸，重置状态
-            if self.eye_state != "open":
-                self.eye_state = "open"
-                self.closed_start_time = None
-                socketio.start_background_task(
-                    lambda: socketio.emit("eyes_opened", {
-                        "timestamp": datetime.now().isoformat(),
-                        "reason": "no_face_detected"
-                    })
-                )
-            return {"status": "no_face_detected"}
-
-        for face_landmarks in results.multi_face_landmarks:
-            landmarks = [(lm.x, lm.y) for lm in face_landmarks.landmark]
-            left_ear = self._calculate_ear(landmarks, LEFT_EYE)
-            right_ear = self._calculate_ear(landmarks, RIGHT_EYE)
-            avg_ear = (left_ear + right_ear) / 2
-            
-            # 检测眼睛状态
-            detection_result = self.detect_eye_state(avg_ear)
-            
-            # 发送实时数据
+            # --- 发送实时数据流 ---
             socketio.start_background_task(
                 lambda: socketio.emit("eye_data", {
-                    "timestamp": datetime.now().isoformat(),
                     "ear": avg_ear,
-                    "left_ear": left_ear,
-                    "right_ear": right_ear,
-                    "state": self.eye_state,
+                    "state": current_state,
                     "threshold": self.threshold,
                     "fps": self.fps,
-                    "calibrating": self.calibrating
+                    "calibrating": False
                 })
             )
-            
-            return detection_result
-        
-        return {"status": "processing_failed"}
 
-
-# 全局检测器实例
+# 全局单例
 detector = EyeStateDetector()
-
-
-@socketio.on("connect")
-def handle_connect():
-    """客户端连接时触发"""
-    global detector
-    detector.connected_clients += 1
-    print(f"客户端已连接，当前连接数: {detector.connected_clients}")
-    
-    # 发送连接确认
-    socketio.emit("connected", {
-        "status": "connected",
-        "message": "欢迎使用眨眼检测系统",
-        "calibration_required": detector.calibrating
-    })
-
-
-@socketio.on("disconnect")
-def handle_disconnect():
-    """客户端断开时触发"""
-    global detector
-    detector.connected_clients -= 1
-    print(f"客户端已断开，剩余连接数: {detector.connected_clients}")
-
-
-@socketio.on("reset_calibration")
-def handle_reset_calibration():
-    """重置校准"""
-    detector.reset()
-    print("校准已重置")
-    return {"status": "calibration_reset"}
-
 
 @socketio.on("frame")
 def handle_frame(data):
-    """处理视频帧"""
+    """
+    处理前端发来的 Blob 数据
+    """
     try:
-        # 解析图像数据
+        if not data:
+            return
+
+        # 健壮性处理：兼容 Blob (bytes) 和 file-like object
         if hasattr(data, "read"):
             image_data = data.read()
         else:
             image_data = data
-        
-        # 解码图像
+        # 解码图片
         img = Image.open(BytesIO(image_data))
+        # 转换为 OpenCV 格式 (BGR)
         frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        
-        # 处理帧
-        result = detector.process_frame(frame)
-        
-        # 返回处理结果
-        return result
-        
+        # 处理
+        detector.process_frame(frame)
     except Exception as e:
-        print(f"[ERROR] 帧处理失败: {e}")
-        socketio.start_background_task(
-            lambda: socketio.emit("error", {
-                "message": f"帧处理失败: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            })
-        )
-        return {"status": "error", "message": str(e)}
+        # 打印错误，但不让服务器崩溃
+        print(f"[ERROR] Frame processing error: {e}")
 
-
-@socketio.on("get_status")
-def handle_get_status():
-    """获取当前状态"""
-    return {
-        "calibrating": detector.calibrating,
-        "eye_state": detector.eye_state,
-        "blink_count": detector.blink_count,
-        "threshold": detector.threshold,
-        "connected_clients": detector.connected_clients,
-        "fps": detector.fps
-    }
-
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    """健康检查"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "clients": detector.connected_clients,
-        "calibrated": not detector.calibrating
-    }
-
+@app.route("/health")
+def health():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
-    print("启动眨眼检测服务器...")
-    print("服务地址: http://0.0.0.0:5000")
-    print("WebSocket地址: ws://0.0.0.0:5000")
+    print("启动眨眼检测服务器 (Optimized)...")
+    print("地址: http://localhost:5000")
     socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)

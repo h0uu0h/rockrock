@@ -10,6 +10,7 @@ import { Biome, WorldObject, InteractionLog, Card, Rarity } from "./types";
 import { generateSensoryFeedback } from "./services/geminiService";
 import { playInteractionSound } from "./services/soundService";
 import { EffectComposer, Noise, Vignette, Pixelation } from "@react-three/postprocessing";
+// import { useEyeController } from "./components/EyeController";
 
 const ColorTag = "color" as any;
 const FogTag = "fog" as any;
@@ -86,9 +87,36 @@ export default function App() {
     const [isGalleryOpen, setIsGalleryOpen] = useState(false);
     const [currentPulledCard, setCurrentPulledCard] = useState<Card | null>(null);
 
-    useEffect(() => {
-        localStorage.setItem("lithos_collection", JSON.stringify(collection));
-    }, [collection]);
+    const eyeControllerConfig = useMemo(
+        () => ({
+            enabled: true,
+            onEyesClosed: (duration: number) => {
+                console.log(`眼睛闭合，持续时间: ${duration}s`);
+                setEyesClosed(true);
+                if (duration > 1.0) {
+                    // 长时间闭眼逻辑
+                }
+            },
+            onEyesOpened: () => {
+                console.log("眼睛睁开");
+                setEyesClosed(false);
+            },
+            onBlink: (blinkCount: number) => {
+                // 注意：这里需要引用最新的 state (eyesClosed, isThinking, godMode)
+                // 但由于我们在 useEffect 里是通过 event 触发 handleBlink 的，
+                // 这里仅仅是打印日志，或者你需要用 ref 来获取最新状态
+                console.log(`眨眼 ${blinkCount} 次`);
+            },
+        }),
+        []
+    ); // 👈 这里的空数组很重要
+    /* 眨眼这块功能先屏蔽掉 */
+
+    // 初始化眨眼控制器
+    // const eyeController = useEyeController(eyeControllerConfig);
+    // useEffect(() => {
+    //     localStorage.setItem("lithos_collection", JSON.stringify(collection));
+    // }, [collection]);
 
     const worldObjects = useMemo(() => {
         const seed = `${biome}-seed`; // 使用固定种子确保稳定
@@ -216,19 +244,23 @@ export default function App() {
         },
         [godMode]
     );
-
-    useEffect(() => {
-        window.addEventListener("keydown", handleKeyDown);
-        window.addEventListener("keyup", handleKeyUp);
-
-        return () => {
-            window.removeEventListener("keydown", handleKeyDown);
-            window.removeEventListener("keyup", handleKeyUp);
-        };
-    }, [handleKeyDown, handleKeyUp]);
+    /* 眨眼这块功能先屏蔽掉 */
+    // useEffect(() => {
+    //     if (eyeController.isConnected) {
+    //         window.removeEventListener("keydown", handleKeyDown);
+    //         window.removeEventListener("keyup", handleKeyUp);
+    //     } else {
+    //         window.addEventListener("keydown", handleKeyDown);
+    //         window.addEventListener("keyup", handleKeyUp);
+    //     }
+    //     return () => {
+    //         window.removeEventListener("keydown", handleKeyDown);
+    //         window.removeEventListener("keyup", handleKeyUp);
+    //     };
+    // }, [handleKeyDown, handleKeyUp]);
 
     const fogNear = godMode ? 20 : eyesClosed ? 1.0 : 2;
-    const fogFar = godMode ? 120 : eyesClosed ? 12 : 12;
+    const fogFar = godMode ? 120 : eyesClosed ? 4.5 : 12;
 
     return (
         <div className="w-full h-screen bg-black relative font-sans select-none overflow-hidden">
@@ -267,7 +299,16 @@ export default function App() {
                 onToggleGodMode={() => setGodMode(!godMode)}
                 onOpenGallery={() => setIsGalleryOpen(true)}
             />
-
+            {/* 眨眼这块功能先屏蔽掉 */}
+            {/* {eyeController.isConnected && (
+                <div className="absolute bottom-4 right-4 bg-black/80 text-white p-2 rounded text-xs">
+                    <div>眼睛: {eyeController.eyeState === "closed" ? "闭合" : "睁开"}</div>
+                    <div>EAR: {eyeController.earValue.toFixed(3)}</div>
+                    <div>眨眼: {eyeController.blinkCount}</div>
+                    <div>FPS: {eyeController.fps}</div>
+                    {eyeController.isCalibrating && <div className="text-yellow-400">校准中...</div>}
+                </div>
+            )} */}
             <Gallery collection={collection} isOpen={isGalleryOpen} onClose={() => setIsGalleryOpen(false)} />
             <CardPullOverlay card={currentPulledCard} onClose={() => setCurrentPulledCard(null)} />
         </div>
