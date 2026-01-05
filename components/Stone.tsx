@@ -2,7 +2,7 @@ import React, { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Mesh, Vector3, Group as ThreeGroup } from "three";
 import { Biome, WorldObject } from "../types";
-import { playCollisionSound } from "../services/soundService";
+import { playCollisionSound } from "../services/audioSystem";
 
 const Group = "group" as any;
 const PointLight = "pointLight" as any;

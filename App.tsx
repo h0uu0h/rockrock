@@ -7,38 +7,74 @@ import { Overlay } from "./components/Overlay";
 import { Gallery } from "./components/Gallery";
 import { CardPullOverlay } from "./components/CardPullOverlay";
 import { Biome, WorldObject, InteractionLog, Card, Rarity } from "./types";
-// import { generateSensoryFeedback } from "./services/geminiService";
 import { generateSensoryFeedback } from "./services/deepseekService";
-import { playInteractionSound } from "./services/soundService";
+// import { playInteractionSound } from "./services/soundService";
+import { playInteractionSound, playBiomeAmbience, preloadAudio, initAudioSystem } from "./services/audioSystem";
 import { EffectComposer, Noise, Vignette, Pixelation } from "@react-three/postprocessing";
 // import { useEyeController } from "./components/EyeController";
 const ObjectTranslations: Record<string, string> = {
     // 海边
-    "shell": "贝壳", "seaweed": "海藻", "reef_rock": "礁石", "drift_bottle": "漂流瓶",
+    shell: "贝壳",
+    seaweed: "海藻",
+    reef_rock: "礁石",
+    drift_bottle: "漂流瓶",
     // 山谷
-    "pine_root": "松树根", "leaves_pile": "落叶堆", "stream_bed_rock": "河床石", "pine_cone": "松果",
+    pine_root: "松树根",
+    leaves_pile: "落叶堆",
+    stream_bed_rock: "河床石",
+    pine_cone: "松果",
     // 鱼缸
-    "goldfish": "金鱼", "water_weed": "水草", "filter_bubbles": "气泡", "gravel_mound": "碎石堆",
+    goldfish: "金鱼",
+    water_weed: "水草",
+    filter_bubbles: "气泡",
+    gravel_mound: "碎石堆",
     // 沙漠
-    "cactus": "仙人掌", "dune_edge": "沙丘脊", "ancient_ruin": "古遗迹", "dry_skull": "枯骨",
+    cactus: "仙人掌",
+    dune_edge: "沙丘脊",
+    ancient_ruin: "古遗迹",
+    dry_skull: "枯骨",
     // 雨林
-    "glowing_mushroom": "发光蘑菇", "rotten_log": "腐朽圆木", "vine_tangle": "缠绕藤蔓", "mossy_stone": "青苔石",
+    glowing_mushroom: "发光蘑菇",
+    rotten_log: "腐朽圆木",
+    vine_tangle: "缠绕藤蔓",
+    mossy_stone: "青苔石",
     // 冰川
-    "ice_pillar": "冰柱", "ice_hole": "冰窟窿", "penguin": "企鹅", "frozen_rock": "冻土石",
+    ice_pillar: "冰柱",
+    ice_hole: "冰窟窿",
+    penguin: "企鹅",
+    frozen_rock: "冻土石",
     // 温泉
-    "spring_vent": "温泉眼", "steam_fissure": "地热裂缝", "slate_floor": "青石板", "sulfur_rock": "硫磺石",
+    spring_vent: "温泉眼",
+    steam_fissure: "地热裂缝",
+    slate_floor: "青石板",
+    sulfur_rock: "硫磺石",
     // 火山
-    "magma_crack": "岩浆裂缝", "gas_vent": "喷气孔", "obsidian_shard": "黑曜石片", "basalt_rock": "玄武岩",
+    magma_crack: "岩浆裂缝",
+    gas_vent: "喷气孔",
+    obsidian_shard: "黑曜石片",
+    basalt_rock: "玄武岩",
     // 乐园
-    "carousel_pole": "木马立柱", "rusted_rail": "生锈铁轨", "plastic_toy_part": "塑料玩具碎片", "ticket_booth_rubble": "售票亭废墟",
+    carousel_pole: "木马立柱",
+    rusted_rail: "生锈铁轨",
+    plastic_toy_part: "塑料玩具碎片",
+    ticket_booth_rubble: "售票亭废墟",
     // 老宅
-    "wind_chime": "风铃", "paper_lantern": "纸灯笼", "old_cat_sleeping": "沉睡的老猫", "wooden_floorboard": "旧木地板",
+    wind_chime: "风铃",
+    paper_lantern: "纸灯笼",
+    old_cat_sleeping: "沉睡的老猫",
+    wooden_floorboard: "旧木地板",
     // 下水道
-    "trash_bag": "垃圾袋", "scared_rat": "受惊的老鼠", "rusty_pipe": "锈蚀水管", "sludge_puddle": "污泥坑",
+    trash_bag: "垃圾袋",
+    scared_rat: "受惊的老鼠",
+    rusty_pipe: "锈蚀水管",
+    sludge_puddle: "污泥坑",
     // 古寺
-    "stone_step": "石阶", "prayer_flag": "经幡", "meditating_monk": "打坐的僧人", "incense_burner": "香炉",
+    stone_step: "石阶",
+    prayer_flag: "经幡",
+    meditating_monk: "打坐的僧人",
+    incense_burner: "香炉",
     // 虚无
-    "void": "虚无"
+    void: "虚无",
 };
 const ColorTag = "color" as any;
 const FogTag = "fog" as any;
@@ -114,6 +150,18 @@ export default function App() {
     });
     const [isGalleryOpen, setIsGalleryOpen] = useState(false);
     const [currentPulledCard, setCurrentPulledCard] = useState<Card | null>(null);
+
+    // 初始化预加载
+    useEffect(() => {
+        preloadAudio();
+    }, []);
+
+    // 监听 Biome 变化，切换背景音
+    useEffect(() => {
+        // 只有当不是 GodMode (或者你自己定义的逻辑) 时才播放
+        // 这里直接切换
+        playBiomeAmbience(biome);
+    }, [biome]);
 
     const eyeControllerConfig = useMemo(
         () => ({
@@ -250,6 +298,7 @@ export default function App() {
 
     const handleKeyDown = useCallback(
         (e: KeyboardEvent) => {
+            initAudioSystem();
             if (e.code === "Space" && !e.repeat && !godMode) {
                 setEyesClosed(true);
             }
