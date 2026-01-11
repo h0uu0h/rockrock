@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Vector3 } from "three";
+// 引入 Socket.io 客户端
+import { io } from "socket.io-client";
+
 import { Stone } from "./components/Stone";
 import { World } from "./components/World";
 import { Overlay } from "./components/Overlay";
@@ -8,11 +11,11 @@ import { Gallery } from "./components/Gallery";
 import { CardPullOverlay } from "./components/CardPullOverlay";
 import { Biome, WorldObject, InteractionLog, Card, Rarity } from "./types";
 import { generateSensoryFeedback } from "./services/deepseekService";
-// import { playInteractionSound } from "./services/soundService";
 import { playInteractionSound, playBiomeAmbience, preloadAudio, initAudioSystem } from "./services/audioSystem";
 import { EffectComposer, Noise, Vignette, Pixelation } from "@react-three/postprocessing";
-// import { useEyeController } from "./components/EyeController";
+
 const ObjectTranslations: Record<string, string> = {
+    // ... (保留原有的翻译字典，此处省略以节省空间，请保持你原代码中的内容) ...
     // 海边
     shell: "贝壳",
     seaweed: "海藻",
@@ -76,12 +79,14 @@ const ObjectTranslations: Record<string, string> = {
     // 虚无
     void: "虚无",
 };
+
 const ColorTag = "color" as any;
 const FogTag = "fog" as any;
 const AmbientLight = "ambientLight" as any;
 const DirectionalLight = "directionalLight" as any;
 
 const generateBiomeObjects = (biome: Biome, count: number = 60): WorldObject[] => {
+    // ... (保留你原有的生成逻辑，代码太长此处折叠) ...
     const objects: WorldObject[] = [];
     const types: Record<Biome, string[]> = {
         [Biome.BEACH]: ["shell", "seaweed", "reef_rock", "drift_bottle"],
@@ -151,6 +156,25 @@ export default function App() {
     const [isGalleryOpen, setIsGalleryOpen] = useState(false);
     const [currentPulledCard, setCurrentPulledCard] = useState<Card | null>(null);
 
+    const currentPulledCardRef = useRef<Card | null>(null);
+    const isThinkingRef = useRef(isThinking);
+    const godModeRef = useRef(godMode);
+    const eyesClosedRef = useRef(eyesClosed);
+
+    // 同步 Refs
+    useEffect(() => {
+        currentPulledCardRef.current = currentPulledCard;
+    }, [currentPulledCard]);
+    useEffect(() => {
+        isThinkingRef.current = isThinking;
+    }, [isThinking]);
+    useEffect(() => {
+        godModeRef.current = godMode;
+    }, [godMode]);
+    useEffect(() => {
+        eyesClosedRef.current = eyesClosed;
+    }, [eyesClosed]);
+
     // 初始化预加载
     useEffect(() => {
         preloadAudio();
@@ -158,47 +182,15 @@ export default function App() {
 
     // 监听 Biome 变化，切换背景音
     useEffect(() => {
-        // 只有当不是 GodMode (或者你自己定义的逻辑) 时才播放
-        // 这里直接切换
         playBiomeAmbience(biome);
     }, [biome]);
 
-    const eyeControllerConfig = useMemo(
-        () => ({
-            enabled: true,
-            onEyesClosed: (duration: number) => {
-                console.log(`眼睛闭合，持续时间: ${duration}s`);
-                setEyesClosed(true);
-                if (duration > 1.0) {
-                    // 长时间闭眼逻辑
-                }
-            },
-            onEyesOpened: () => {
-                console.log("眼睛睁开");
-                setEyesClosed(false);
-            },
-            onBlink: (blinkCount: number) => {
-                // 注意：这里需要引用最新的 state (eyesClosed, isThinking, godMode)
-                // 但由于我们在 useEffect 里是通过 event 触发 handleBlink 的，
-                // 这里仅仅是打印日志，或者你需要用 ref 来获取最新状态
-                console.log(`眨眼 ${blinkCount} 次`);
-            },
-        }),
-        []
-    ); // 👈 这里的空数组很重要
-    /* 眨眼这块功能先屏蔽掉 */
-
-    // 初始化眨眼控制器
-    // const eyeController = useEyeController(eyeControllerConfig);
-    // useEffect(() => {
-    //     localStorage.setItem("lithos_collection", JSON.stringify(collection));
-    // }, [collection]);
-
     const worldObjects = useMemo(() => {
-        const seed = `${biome}-seed`; // 使用固定种子确保稳定
-        return generateBiomeObjects(biome, 300); // 减少数量
+        const seed = `${biome}-seed`;
+        return generateBiomeObjects(biome, 300);
     }, [biome]);
 
+    // 时间流逝逻辑
     useEffect(() => {
         let interval: ReturnType<typeof setInterval>;
         if (eyesClosed && !godMode) {
@@ -215,8 +207,24 @@ export default function App() {
         }
     }, []);
 
-    const handleBlink = async () => {
-        if (eyesClosed || isThinking || godMode) return;
+    // === 修改后的 handleBlink ===
+    // 增加 force 参数：如果来自 WebSocket 的 blink 事件，则忽略 "eyesClosed" 检查
+    // 因为 WebSocket 传来的 blink 意味着用户刚刚完成了睁眼动作
+    const handleBlink = async (force: boolean = false) => {
+        if (currentPulledCardRef.current) {
+            console.log("卡片展示中，忽略眨眼交互");
+            return;
+            // 进阶玩法：如果你希望眨眼能【关闭】当前卡片，可以用下面这行代替上面的 return
+            setCurrentPulledCard(null);
+            return;
+        }
+        // 使用 Ref 判断状态，确保在 Socket 回调中也是最新的
+        const isBlocked = !force && (eyesClosedRef.current || isThinkingRef.current || godModeRef.current);
+        // 如果被阻塞（且不是强制触发），则返回
+        if (isBlocked) return;
+
+        // 如果正在思考中（无论是否强制），都不要打断
+        if (isThinkingRef.current) return;
 
         const currentPos = stonePosRef.current;
         if (!currentPos) return;
@@ -257,7 +265,6 @@ export default function App() {
 
             setLogs((prev) => [...prev, newLog]);
 
-            // Create and Pull Card
             let rarity: Rarity = "COMMON";
             if (year > 10000) rarity = "ETERNAL";
             else if (minDist < 1.0 || Math.random() > 0.8) rarity = "RARE";
@@ -296,22 +303,59 @@ export default function App() {
         }
     };
 
+    // === WebSocket 连接逻辑 ===
+    useEffect(() => {
+        // 连接 Python 后端
+        const socket = io("http://localhost:5000");
+
+        socket.on("connect", () => {
+            console.log("已连接到眼动追踪服务器");
+        });
+
+        // 监听闭眼/睁眼状态
+        socket.on("eye_closed", (data: { type: string; timestamp: number }) => {
+            if (godModeRef.current) return; // 上帝模式下不响应
+            if (currentPulledCardRef.current) return;
+            if (data.type === "start") {
+                console.log("检测到闭眼");
+                setEyesClosed(true);
+            } else if (data.type === "end") {
+                console.log("检测到睁眼");
+                setEyesClosed(false);
+            }
+        });
+
+        // 监听眨眼事件
+        socket.on("blink", (data) => {
+            if (godModeRef.current) return;
+            console.log("检测到眨眼交互", data);
+
+            // 收到 blink 事件意味着用户刚完成睁眼，强制触发 handleBlink
+            // 并且确保 eyesClosed 状态被重置
+            setEyesClosed(false);
+            handleBlink(true);
+        });
+
+        return () => {
+            socket.disconnect();
+        };
+    }, [worldObjects]); // 当场景物体变化时重新绑定(因为 handleBlink 依赖 worldObjects)
+
+    // 键盘兜底逻辑 (保留，方便调试)
     const handleKeyDown = useCallback(
         (e: KeyboardEvent) => {
             initAudioSystem();
             if (e.code === "Space" && !e.repeat && !godMode) {
                 setEyesClosed(true);
             }
-
             if (e.code === "Enter" && !e.repeat) {
-                handleBlink();
+                handleBlink(false);
             }
-
             if (e.code === "KeyG" && !e.repeat) {
                 setIsGalleryOpen((prev) => !prev);
             }
         },
-        [godMode, handleBlink]
+        [godMode]
     );
 
     const handleKeyUp = useCallback(
@@ -322,20 +366,15 @@ export default function App() {
         },
         [godMode]
     );
-    /* 眨眼这块功能先屏蔽掉 */
-    // useEffect(() => {
-    //     if (eyeController.isConnected) {
-    //         window.removeEventListener("keydown", handleKeyDown);
-    //         window.removeEventListener("keyup", handleKeyUp);
-    //     } else {
-    //         window.addEventListener("keydown", handleKeyDown);
-    //         window.addEventListener("keyup", handleKeyUp);
-    //     }
-    //     return () => {
-    //         window.removeEventListener("keydown", handleKeyDown);
-    //         window.removeEventListener("keyup", handleKeyUp);
-    //     };
-    // }, [handleKeyDown, handleKeyUp]);
+
+    useEffect(() => {
+        window.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("keyup", handleKeyUp);
+        return () => {
+            window.removeEventListener("keydown", handleKeyDown);
+            window.removeEventListener("keyup", handleKeyUp);
+        };
+    }, [handleKeyDown, handleKeyUp]);
 
     const fogNear = godMode ? 20 : eyesClosed ? 1.0 : 2;
     const fogFar = godMode ? 120 : eyesClosed ? 4.5 : 12;
@@ -354,13 +393,8 @@ export default function App() {
                     obstacles={worldObjects || []}
                     isThinking={isThinking}
                 />
-                {/* Fix: Removed eyesClosed prop from World component call as it is not defined in WorldProps */}
                 <World biome={biome} objects={worldObjects || []} />
-                <EffectComposer enableNormalPass={false}>
-                    {!godMode && <Pixelation granularity={6} />}
-                    {/* <Noise opacity={eyesClosed ? 0.4 : 0.1} /> */}
-                    {/* <Vignette eskil={false} offset={0.1} darkness={godMode ? 0.5 : eyesClosed ? 1.8 : 1.3} /> */}
-                </EffectComposer>
+                <EffectComposer enableNormalPass={false}>{!godMode && <Pixelation granularity={6} />}</EffectComposer>
                 <CameraRig targetRef={stonePosRef} eyesClosed={eyesClosed} godMode={godMode} />
             </Canvas>
 
@@ -371,22 +405,13 @@ export default function App() {
                 logs={logs}
                 isThinking={isThinking}
                 godMode={godMode}
-                onBlink={handleBlink}
+                onBlink={() => handleBlink(false)}
                 onToggleEyes={setEyesClosed}
                 onChangeBiome={setBiome}
                 onToggleGodMode={() => setGodMode(!godMode)}
                 onOpenGallery={() => setIsGalleryOpen(true)}
             />
-            {/* 眨眼这块功能先屏蔽掉 */}
-            {/* {eyeController.isConnected && (
-                <div className="absolute bottom-4 right-4 bg-black/80 text-white p-2 rounded text-xs">
-                    <div>眼睛: {eyeController.eyeState === "closed" ? "闭合" : "睁开"}</div>
-                    <div>EAR: {eyeController.earValue.toFixed(3)}</div>
-                    <div>眨眼: {eyeController.blinkCount}</div>
-                    <div>FPS: {eyeController.fps}</div>
-                    {eyeController.isCalibrating && <div className="text-yellow-400">校准中...</div>}
-                </div>
-            )} */}
+
             <Gallery collection={collection} isOpen={isGalleryOpen} onClose={() => setIsGalleryOpen(false)} />
             <CardPullOverlay card={currentPulledCard} onClose={() => setCurrentPulledCard(null)} />
         </div>
